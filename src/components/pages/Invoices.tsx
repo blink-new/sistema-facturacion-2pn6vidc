@@ -1,8 +1,11 @@
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { blink } from '@/blink/client'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
+import { useToast } from '@/hooks/use-toast'
+import { InvoiceForm } from './InvoiceForm'
 import { 
   Plus, 
   Search, 
@@ -28,58 +31,102 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import type { Invoice } from '@/types'
 
 export function Invoices() {
+  const [invoices, setInvoices] = useState<Invoice[]>([])
+  const [loading, setLoading] = useState(true)
   const [searchTerm, setSearchTerm] = useState('')
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null)
+  const { toast } = useToast()
 
-  // Mock data - will be replaced with real data from database
-  const invoices = [
-    {
-      id: 'INV-001',
-      invoiceNumber: 'FAC-2024-001',
-      client: 'Empresa ABC S.A.',
-      issueDate: '2024-01-10',
-      dueDate: '2024-01-15',
-      amount: 2500.00,
-      status: 'paid' as const
-    },
-    {
-      id: 'INV-002',
-      invoiceNumber: 'FAC-2024-002',
-      client: 'Comercial XYZ Ltda.',
-      issueDate: '2024-01-12',
-      dueDate: '2024-01-20',
-      amount: 1800.00,
-      status: 'sent' as const
-    },
-    {
-      id: 'INV-003',
-      invoiceNumber: 'FAC-2024-003',
-      client: 'Servicios DEF',
-      issueDate: '2024-01-05',
-      dueDate: '2024-01-10',
-      amount: 950.00,
-      status: 'overdue' as const
-    },
-    {
-      id: 'INV-004',
-      invoiceNumber: 'FAC-2024-004',
-      client: 'Industrias GHI',
-      issueDate: '2024-01-15',
-      dueDate: '2024-01-25',
-      amount: 3200.00,
-      status: 'draft' as const
-    },
-    {
-      id: 'INV-005',
-      invoiceNumber: 'FAC-2024-005',
-      client: 'Tecnología JKL',
-      issueDate: '2024-01-18',
-      dueDate: '2024-01-28',
-      amount: 4500.00,
-      status: 'sent' as const
+  const loadInvoices = useCallback(async () => {
+    try {
+      setLoading(true)
+      const user = await blink.auth.me()
+      const invoicesData = await blink.db.invoices.list({ 
+        where: { userId: user.id }, 
+        orderBy: { createdAt: 'desc' } 
+      })
+      setInvoices(invoicesData)
+    } catch (error) {
+      console.error('Error loading invoices:', error)
+      toast({
+        title: 'Error',
+        description: 'No se pudieron cargar las facturas',
+        variant: 'destructive'
+      })
+    } finally {
+      setLoading(false)
     }
-  ]
+  }, [toast])
+
+  useEffect(() => {
+    loadInvoices()
+  }, [loadInvoices])
+
+  const handleCreateInvoice = () => {
+    setEditingInvoice(null)
+    setShowCreateForm(true)
+  }
+
+  const handleEditInvoice = (invoice: Invoice) => {
+    setEditingInvoice(invoice)
+    setShowCreateForm(true)
+  }
+
+  const handleDeleteInvoice = async (invoiceId: string) => {
+    if (!confirm('¿Estás seguro de que quieres eliminar esta factura?')) return
+
+    try {
+      // Delete invoice items first
+      const items = await blink.db.invoiceItems.list({
+        where: { invoiceId }
+      })
+      for (const item of items) {
+        await blink.db.invoiceItems.delete(item.id)
+      }
+      
+      // Then delete the invoice
+      await blink.db.invoices.delete(invoiceId)
+      
+      toast({
+        title: 'Éxito',
+        description: 'Factura eliminada correctamente'
+      })
+      loadInvoices()
+    } catch (error) {
+      console.error('Error deleting invoice:', error)
+      toast({
+        title: 'Error',
+        description: 'No se pudo eliminar la factura',
+        variant: 'destructive'
+      })
+    }
+  }
+
+  const handleUpdateInvoiceStatus = async (invoiceId: string, status: string) => {
+    try {
+      await blink.db.invoices.update(invoiceId, {
+        status,
+        updatedAt: new Date().toISOString()
+      })
+      
+      toast({
+        title: 'Éxito',
+        description: `Estado de factura actualizado a ${status}`
+      })
+      loadInvoices()
+    } catch (error) {
+      console.error('Error updating invoice status:', error)
+      toast({
+        title: 'Error',
+        description: 'No se pudo actualizar el estado de la factura',
+        variant: 'destructive'
+      })
+    }
+  }
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -103,10 +150,36 @@ export function Invoices() {
     }).format(amount)
   }
 
+  const isOverdue = (invoice: Invoice) => {
+    const dueDate = new Date(invoice.dueDate)
+    const now = new Date()
+    return invoice.status === 'sent' && dueDate < now
+  }
+
   const filteredInvoices = invoices.filter(invoice =>
-    invoice.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    invoice.client.toLowerCase().includes(searchTerm.toLowerCase())
+    invoice.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase())
   )
+
+  if (showCreateForm) {
+    return (
+      <InvoiceForm 
+        onBack={() => {
+          setShowCreateForm(false)
+          setEditingInvoice(null)
+          loadInvoices()
+        }}
+        editingInvoice={editingInvoice}
+      />
+    )
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -118,7 +191,7 @@ export function Invoices() {
             Gestiona todas tus facturas
           </p>
         </div>
-        <Button className="bg-primary hover:bg-primary/90">
+        <Button className="bg-primary hover:bg-primary/90" onClick={handleCreateInvoice}>
           <Plus className="mr-2 h-4 w-4" />
           Nueva Factura
         </Button>
@@ -131,7 +204,7 @@ export function Invoices() {
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground h-4 w-4" />
               <Input
-                placeholder="Buscar por número de factura o cliente..."
+                placeholder="Buscar por número de factura..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="pl-10"
@@ -153,72 +226,105 @@ export function Invoices() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Número</TableHead>
-                <TableHead>Cliente</TableHead>
-                <TableHead>Fecha Emisión</TableHead>
-                <TableHead>Fecha Vencimiento</TableHead>
-                <TableHead>Importe</TableHead>
-                <TableHead>Estado</TableHead>
-                <TableHead className="w-[50px]"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredInvoices.map((invoice) => (
-                <TableRow key={invoice.id}>
-                  <TableCell className="font-medium">
-                    {invoice.invoiceNumber}
-                  </TableCell>
-                  <TableCell>{invoice.client}</TableCell>
-                  <TableCell>
-                    {new Date(invoice.issueDate).toLocaleDateString('es-ES')}
-                  </TableCell>
-                  <TableCell>
-                    {new Date(invoice.dueDate).toLocaleDateString('es-ES')}
-                  </TableCell>
-                  <TableCell className="font-semibold">
-                    {formatCurrency(invoice.amount)}
-                  </TableCell>
-                  <TableCell>
-                    {getStatusBadge(invoice.status)}
-                  </TableCell>
-                  <TableCell>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="sm">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem>
-                          <Eye className="mr-2 h-4 w-4" />
-                          Ver
-                        </DropdownMenuItem>
-                        <DropdownMenuItem>
-                          <Edit className="mr-2 h-4 w-4" />
-                          Editar
-                        </DropdownMenuItem>
-                        <DropdownMenuItem>
-                          <Send className="mr-2 h-4 w-4" />
-                          Enviar
-                        </DropdownMenuItem>
-                        <DropdownMenuItem>
-                          <Download className="mr-2 h-4 w-4" />
-                          Descargar PDF
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-600">
-                          <Trash2 className="mr-2 h-4 w-4" />
-                          Eliminar
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </TableCell>
+          {filteredInvoices.length === 0 ? (
+            <div className="text-center py-8">
+              <p className="text-muted-foreground">
+                {searchTerm ? 'No se encontraron facturas' : 'No hay facturas registradas'}
+              </p>
+              {!searchTerm && (
+                <Button 
+                  className="mt-4" 
+                  onClick={handleCreateInvoice}
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Crear Primera Factura
+                </Button>
+              )}
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Número</TableHead>
+                  <TableHead>Cliente</TableHead>
+                  <TableHead>Fecha Emisión</TableHead>
+                  <TableHead>Fecha Vencimiento</TableHead>
+                  <TableHead>Importe</TableHead>
+                  <TableHead>Estado</TableHead>
+                  <TableHead className="w-[50px]"></TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {filteredInvoices.map((invoice) => (
+                  <TableRow key={invoice.id}>
+                    <TableCell className="font-medium">
+                      {invoice.invoiceNumber}
+                    </TableCell>
+                    <TableCell>
+                      {invoice.client?.name || 'Cliente no encontrado'}
+                    </TableCell>
+                    <TableCell>
+                      {new Date(invoice.issueDate).toLocaleDateString('es-ES')}
+                    </TableCell>
+                    <TableCell>
+                      <div className={isOverdue(invoice) ? 'text-red-600 font-medium' : ''}>
+                        {new Date(invoice.dueDate).toLocaleDateString('es-ES')}
+                        {isOverdue(invoice) && <span className="ml-1">(Vencida)</span>}
+                      </div>
+                    </TableCell>
+                    <TableCell className="font-semibold">
+                      {formatCurrency(invoice.totalAmount)}
+                    </TableCell>
+                    <TableCell>
+                      {isOverdue(invoice) ? (
+                        <Badge className="bg-red-100 text-red-800 hover:bg-red-100">Vencida</Badge>
+                      ) : (
+                        getStatusBadge(invoice.status)
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="sm">
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => handleEditInvoice(invoice)}>
+                            <Edit className="mr-2 h-4 w-4" />
+                            Editar
+                          </DropdownMenuItem>
+                          {invoice.status === 'draft' && (
+                            <DropdownMenuItem onClick={() => handleUpdateInvoiceStatus(invoice.id, 'sent')}>
+                              <Send className="mr-2 h-4 w-4" />
+                              Enviar
+                            </DropdownMenuItem>
+                          )}
+                          {invoice.status === 'sent' && (
+                            <DropdownMenuItem onClick={() => handleUpdateInvoiceStatus(invoice.id, 'paid')}>
+                              <Eye className="mr-2 h-4 w-4" />
+                              Marcar como Pagada
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem>
+                            <Download className="mr-2 h-4 w-4" />
+                            Descargar PDF
+                          </DropdownMenuItem>
+                          <DropdownMenuItem 
+                            className="text-red-600"
+                            onClick={() => handleDeleteInvoice(invoice.id)}
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            Eliminar
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
     </div>
